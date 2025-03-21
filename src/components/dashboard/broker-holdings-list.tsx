@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import { useRouter } from "next/navigation";
 import {
   Card,
   CardContent,
@@ -14,8 +15,8 @@ import { createClient } from "../../../supabase/client";
 import { RefreshCw, AlertCircle, TrendingUp, TrendingDown } from "lucide-react";
 
 interface Holding {
-  symbol: string;
-  name: string;
+  symbol: string | any;
+  name: string | any;
   quantity: number;
   pricePerShare: number;
   totalValue: number;
@@ -24,19 +25,35 @@ interface Holding {
   accountId: string;
   accountName: string;
   brokerName: string;
-  currency: string;
+  currency: string | any;
+  isCash?: boolean;
+  costBasis?: number;
+  percentOfPortfolio?: number;
+}
+
+interface PortfolioSummary {
+  totalValue: number;
+  cashAvailable: number;
+  investedValue: number;
 }
 
 export default function BrokerHoldingsList({
   accountId,
+  debug = false,
 }: {
   accountId?: string;
+  debug?: boolean;
 }) {
   const supabase = createClient();
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [portfolioSummary, setPortfolioSummary] = useState<PortfolioSummary>({
+    totalValue: 0,
+    cashAvailable: 0,
+    investedValue: 0,
+  });
 
   useEffect(() => {
     const fetchUserAndHoldings = async () => {
@@ -71,16 +88,26 @@ export default function BrokerHoldingsList({
     setError(null);
 
     try {
-      const url = accountId
-        ? `/api/snaptrade/holdings?userId=${userId}&accountId=${accountId}`
-        : `/api/snaptrade/holdings?userId=${userId}`;
+      // Toggle between mock and real data for testing
+      let url;
+      const useMockData = debug; // Use mock data in debug mode
+
+      if (useMockData) {
+        url = `/api/snaptrade/mock-holdings`;
+      } else {
+        url = accountId
+          ? `/api/snaptrade/holdings?userId=${userId}&accountId=${accountId}`
+          : `/api/snaptrade/holdings?userId=${userId}`;
+      }
 
       const response = await fetch(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
-          "Cache-Control": "no-store",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          Pragma: "no-cache",
         },
+        cache: "no-store",
       });
 
       const data = await response.json();
@@ -89,7 +116,117 @@ export default function BrokerHoldingsList({
         throw new Error(data.error || "Failed to fetch holdings");
       }
 
-      setHoldings(data.holdings || []);
+      if (debug) console.log("API Response:", data);
+
+      if (debug)
+        console.log(
+          "Raw holdings data:",
+          JSON.stringify(data.holdings, null, 2),
+        );
+
+      // Process holdings data and calculate missing values
+      const processedHoldings = (data.holdings || [])
+        .map((holding) => {
+          // Check if holding is valid
+          if (!holding) {
+            console.error("Invalid holding object:", holding);
+            return null;
+          }
+
+          // Ensure all numeric values are properly parsed
+          const quantity =
+            typeof holding.quantity === "number"
+              ? holding.quantity
+              : parseFloat(holding.quantity || "0");
+          const pricePerShare =
+            typeof holding.pricePerShare === "number"
+              ? holding.pricePerShare
+              : parseFloat(holding.pricePerShare || "0");
+
+          // Calculate totalValue if not available or zero
+          let totalValue =
+            typeof holding.totalValue === "number"
+              ? holding.totalValue
+              : parseFloat(holding.totalValue || "0");
+          if (totalValue === 0 && quantity > 0 && pricePerShare > 0) {
+            totalValue = quantity * pricePerShare;
+          }
+
+          const purchasePrice =
+            typeof holding.purchasePrice === "number"
+              ? holding.purchasePrice
+              : parseFloat(holding.purchasePrice || "0");
+
+          // Calculate cost basis if not available
+          let costBasis = holding.costBasis
+            ? typeof holding.costBasis === "number"
+              ? holding.costBasis
+              : parseFloat(holding.costBasis || "0")
+            : purchasePrice * quantity;
+
+          // If costBasis is still 0 but we have quantity and purchasePrice, calculate it
+          if (costBasis === 0 && quantity > 0 && purchasePrice > 0) {
+            costBasis = purchasePrice * quantity;
+          }
+
+          // Calculate gainLoss if not available
+          let gainLoss =
+            typeof holding.gainLoss === "number"
+              ? holding.gainLoss
+              : parseFloat(holding.gainLoss || "0");
+          if (gainLoss === 0 && totalValue > 0 && costBasis > 0) {
+            gainLoss = totalValue - costBasis;
+          }
+
+          return {
+            ...holding,
+            quantity,
+            pricePerShare,
+            totalValue,
+            purchasePrice,
+            costBasis,
+            gainLoss,
+          };
+        })
+        .filter(Boolean); // Remove any null values
+
+      if (debug)
+        console.log(
+          "Processed holdings:",
+          JSON.stringify(processedHoldings, null, 2),
+        );
+
+      // Calculate portfolio summary
+      const cashHoldings =
+        processedHoldings.filter(
+          (h) =>
+            h.isCash ||
+            h.symbol === "CASH" ||
+            (typeof h.name === "string" && h.name.includes("Cash")),
+        ) || [];
+      const cashAvailable = cashHoldings.reduce(
+        (sum, h) => sum + h.totalValue,
+        0,
+      );
+      const totalValue =
+        processedHoldings.reduce((sum, h) => sum + h.totalValue, 0) || 0;
+      const investedValue = totalValue - cashAvailable;
+
+      // Calculate percentOfPortfolio for each holding
+      const holdingsWithPercentage = processedHoldings.map((holding) => ({
+        ...holding,
+        percentOfPortfolio:
+          totalValue > 0 ? (holding.totalValue / totalValue) * 100 : 0,
+      }));
+
+      // Set holdings with all calculated values
+      setHoldings(holdingsWithPercentage);
+
+      setPortfolioSummary({
+        totalValue,
+        cashAvailable,
+        investedValue,
+      });
     } catch (err) {
       console.error("Error fetching holdings:", err);
       setError(
@@ -102,17 +239,29 @@ export default function BrokerHoldingsList({
     }
   };
 
+  const router = useRouter();
+
   const handleRefresh = () => {
     if (userId) {
       fetchHoldings(userId);
     }
   };
 
-  const formatCurrency = (value: number, currency: string = "USD") => {
+  const formatCurrency = (value: number | string, currency: any = "USD") => {
+    // Ensure value is a number
+    const numericValue =
+      typeof value === "number" ? value : parseFloat(value || "0");
+    // Ensure currency is a valid string
+    const validCurrency =
+      typeof currency === "string" && currency.trim() !== ""
+        ? currency
+        : typeof currency === "object" && currency?.currency
+          ? currency.currency
+          : "USD";
     return new Intl.NumberFormat("en-US", {
       style: "currency",
-      currency: currency,
-    }).format(value);
+      currency: validCurrency,
+    }).format(numericValue);
   };
 
   const formatPercentage = (value: number) => {
@@ -172,11 +321,7 @@ export default function BrokerHoldingsList({
     );
   }
 
-  // Calculate total portfolio value
-  const totalValue = holdings.reduce(
-    (sum, holding) => sum + holding.totalValue,
-    0,
-  );
+  // Portfolio values are now calculated when fetching data and stored in state
 
   return (
     <Card>
@@ -200,18 +345,40 @@ export default function BrokerHoldingsList({
             <Button
               variant="outline"
               className="mt-4"
-              onClick={() => (window.location.href = "/dashboard/assets")}
+              onClick={() => router.push("/dashboard/assets")}
             >
               Add Investments
             </Button>
           </div>
         ) : (
           <div className="space-y-6">
-            <div className="bg-gray-50 p-4 rounded-lg">
-              <h3 className="font-medium text-sm text-gray-500 mb-1">
-                Total Portfolio Value
-              </h3>
-              <p className="text-2xl font-bold">{formatCurrency(totalValue)}</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <h3 className="font-medium text-sm text-gray-500 mb-1">
+                  Total Portfolio Value
+                </h3>
+                <p className="text-2xl font-bold">
+                  {formatCurrency(portfolioSummary.totalValue)}
+                </p>
+              </div>
+
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <h3 className="font-medium text-sm text-gray-500 mb-1">
+                  Cash Available
+                </h3>
+                <p className="text-2xl font-bold">
+                  {formatCurrency(portfolioSummary.cashAvailable)}
+                </p>
+              </div>
+
+              <div className="bg-gray-50 p-4 rounded-lg">
+                <h3 className="font-medium text-sm text-gray-500 mb-1">
+                  Invested Value
+                </h3>
+                <p className="text-2xl font-bold">
+                  {formatCurrency(portfolioSummary.investedValue)}
+                </p>
+              </div>
             </div>
 
             <div className="space-y-4">
@@ -222,9 +389,19 @@ export default function BrokerHoldingsList({
                 >
                   <div className="flex justify-between items-start mb-2">
                     <div>
-                      <h3 className="font-medium">{holding.name}</h3>
+                      <h3 className="font-medium">
+                        {typeof holding.name === "string"
+                          ? holding.name
+                          : typeof holding.symbol === "string"
+                            ? holding.symbol
+                            : "Unknown"}
+                      </h3>
                       <div className="text-sm text-muted-foreground flex items-center">
-                        <span className="font-mono mr-2">{holding.symbol}</span>
+                        <span className="font-mono mr-2">
+                          {typeof holding.symbol === "string"
+                            ? holding.symbol
+                            : holding.symbol?.symbol || "Unknown"}
+                        </span>
                         <span className="text-xs px-2 py-0.5 bg-gray-100 rounded">
                           {holding.accountName}
                         </span>
@@ -247,10 +424,15 @@ export default function BrokerHoldingsList({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-3 gap-2 mt-3 text-sm">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-sm">
                     <div>
                       <div className="text-gray-500">Quantity</div>
-                      <div>{holding.quantity.toLocaleString()}</div>
+                      <div>
+                        {(typeof holding.quantity === "number"
+                          ? holding.quantity
+                          : parseFloat(holding.quantity || "0")
+                        ).toLocaleString()}
+                      </div>
                     </div>
                     <div>
                       <div className="text-gray-500">Price</div>
@@ -265,9 +447,18 @@ export default function BrokerHoldingsList({
                       <div className="text-gray-500">Cost Basis</div>
                       <div>
                         {formatCurrency(
-                          holding.purchasePrice,
+                          holding.costBasis ||
+                            holding.purchasePrice * holding.quantity,
                           holding.currency,
                         )}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-gray-500">% of Portfolio</div>
+                      <div>
+                        {holding.percentOfPortfolio
+                          ? holding.percentOfPortfolio.toFixed(2) + "%"
+                          : "0.00%"}
                       </div>
                     </div>
                   </div>
@@ -281,7 +472,7 @@ export default function BrokerHoldingsList({
         <Button
           variant="outline"
           className="w-full"
-          onClick={() => (window.location.href = "/dashboard/assets")}
+          onClick={() => router.push("/dashboard/assets")}
         >
           Manage Investments
         </Button>

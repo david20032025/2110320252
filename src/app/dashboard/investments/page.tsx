@@ -11,7 +11,7 @@ export default function InvestmentsPage() {
           <BrokerAccountsList />
         </div>
         <div className="lg:col-span-2">
-          <BrokerHoldingsList />
+          <BrokerHoldingsList debug={true} />
         </div>
       </div>
     </div>

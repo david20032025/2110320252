@@ -81,13 +81,46 @@ export default function BrokerAccountsList() {
     setError(null);
 
     try {
-      const response = await fetch(`/api/snaptrade/accounts?userId=${userId}`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store",
+      // First try to refresh the user to ensure we have valid credentials
+      try {
+        const refreshResponse = await fetch(`/api/snaptrade/refresh-user`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ userId }),
+        });
+
+        if (refreshResponse.ok) {
+          console.log(
+            "Successfully refreshed user credentials before fetching accounts",
+          );
+        } else {
+          console.warn(
+            "Refresh before fetching accounts failed, continuing anyway",
+          );
+        }
+      } catch (refreshError) {
+        console.warn(
+          "Failed to refresh user credentials, continuing anyway:",
+          refreshError,
+        );
+        // Continue with the accounts fetch even if refresh fails
+      }
+
+      // Add a cache-busting parameter to prevent caching issues
+      const cacheBuster = Date.now();
+      const response = await fetch(
+        `/api/snaptrade/accounts?userId=${userId}&_=${cacheBuster}`,
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            Pragma: "no-cache",
+          },
         },
-      });
+      );
 
       const data = await response.json();
 
@@ -144,6 +177,56 @@ export default function BrokerAccountsList() {
         err instanceof Error
           ? err.message
           : "Failed to delete account. Please try again later.",
+      );
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleDeleteSnapTradeUser = async () => {
+    if (!userId) return;
+
+    setIsDeleting(true);
+    try {
+      // First, re-register the user to ensure we have a valid connection
+      const registerResponse = await fetch(`/api/snaptrade/register`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ userId }),
+      });
+
+      if (!registerResponse.ok) {
+        const data = await registerResponse.json();
+        console.warn("Registration before deletion failed:", data.error);
+        // Continue with deletion anyway
+      } else {
+        console.log("User re-registered successfully before deletion");
+      }
+
+      // Delete the SnapTrade user completely
+      const response = await fetch(`/api/snaptrade/register?userId=${userId}`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || "Failed to delete SnapTrade user");
+      }
+
+      // Refresh the accounts list
+      await fetchAccounts(userId);
+      setDeletingAccount(null);
+    } catch (err) {
+      console.error("Error deleting SnapTrade user:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to delete SnapTrade user. Please try again later.",
       );
     } finally {
       setIsDeleting(false);
@@ -274,16 +357,30 @@ export default function BrokerAccountsList() {
                         <AlertDialogCancel disabled={isDeleting}>
                           Cancel
                         </AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={(e) => {
-                            e.preventDefault();
-                            handleDeleteAccount(account);
-                          }}
-                          className="bg-red-600 hover:bg-red-700"
-                          disabled={isDeleting}
-                        >
-                          {isDeleting ? "Deleting..." : "Delete"}
-                        </AlertDialogAction>
+                        <div className="flex gap-2">
+                          <AlertDialogAction
+                            onClick={(e) => {
+                              e.preventDefault();
+                              handleDeleteAccount(account);
+                            }}
+                            className="bg-red-600 hover:bg-red-700"
+                            disabled={isDeleting}
+                          >
+                            {isDeleting ? "Deleting..." : "Delete Connection"}
+                          </AlertDialogAction>
+                          <AlertDialogAction
+                            onClick={(e) => {
+                              e.preventDefault();
+                              handleDeleteSnapTradeUser();
+                            }}
+                            className="bg-red-800 hover:bg-red-900"
+                            disabled={isDeleting}
+                          >
+                            {isDeleting
+                              ? "Deleting..."
+                              : "Delete User Completely"}
+                          </AlertDialogAction>
+                        </div>
                       </AlertDialogFooter>
                     </AlertDialogContent>
                   </AlertDialog>
